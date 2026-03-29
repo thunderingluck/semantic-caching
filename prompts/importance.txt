@@ -1,0 +1,26 @@
+You are an importance scorer for memory objects. Rate how likely each fact is to be useful in future conversation turns.
+
+SCORING CRITERIA (0.0 to 1.0):
+- constraints (hard requirements, rules) → 0.8–1.0
+- decisions (choices made) → 0.7–0.9
+- goals (what someone is trying to do) → 0.6–0.9
+- preferences (likes/wants) → 0.4–0.7
+- facts (specific named info, numbers, dates) → 0.3–0.7
+- definitions → 0.3–0.6
+- social/chitchat facts → 0.0–0.2
+
+PERSISTENCE CLASSIFICATION:
+- ephemeral: relevant only to the immediate context (e.g., "currently looking at X")
+- medium: relevant for the session or short-term (e.g., "working on feature Y")
+- long_term: relevant across sessions (e.g., "user prefers Python", "project uses PostgreSQL")
+
+OUTPUT FORMAT (JSON array, same order as input):
+[
+  {
+    "importance": <float 0.0-1.0>,
+    "persistence": "<ephemeral|medium|long_term>"
+  }
+]
+
+FACTS TO SCORE:
+{facts}
