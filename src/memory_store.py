@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
@@ -167,6 +168,21 @@ class MemoryStore:
 
     def archive(self, memory_id: str) -> None:
         self.update_status(memory_id, "archived")
+
+    def update_importance(self, memory_id: str, delta: float) -> None:
+        """
+        Adjust the importance score of a memory by delta, clamped to [0.0, 1.0].
+        Called by ImportanceLearner to apply RLVR reward-based policy updates.
+        """
+        results = self._collection.get(ids=[memory_id], include=["metadatas"])
+        if not results["ids"]:
+            return
+        current = float(results["metadatas"][0].get("importance", 0.5))
+        new_importance = float(np.clip(current + delta, 0.0, 1.0))
+        self._collection.update(
+            ids=[memory_id],
+            metadatas=[{"importance": new_importance}],
+        )
 
     # ── Staleness detection ──────────────────────
 

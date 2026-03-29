@@ -13,9 +13,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
+import tiktoken
 
 from memory_store import MemoryStore
 from memory_writer import MemoryObject
+
+_TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
 
 @dataclass
@@ -33,8 +36,9 @@ class ContextBuilder:
     """
     Builds a curated context string from the memory store for a given query.
 
-    Scoring:
-      score = α·relevance + β·importance + γ·recency - λ·max_pairwise_similarity
+    Base score: α·relevance + β·importance + γ·recency
+    Selection: greedy MMR — each pick maximizes base_score minus λ·max_sim_to_selected,
+    ensuring diversity across the token budget.
     """
 
     def __init__(
@@ -137,22 +141,12 @@ class ContextBuilder:
         relevances = [r for _, r in candidates]
         recencies = _compute_recencies([m.created_at for m in mems])
 
-        # Collect embeddings for redundancy computation
-        embeddings = []
-        for m in mems:
-            if m.embedding:
-                embeddings.append(np.array(m.embedding))
-            else:
-                embeddings.append(np.zeros(384))
-
         scored = []
-        for i, (mem, rel, rec) in enumerate(zip(mems, relevances, recencies)):
-            redundancy = _max_pairwise_similarity(i, embeddings)
+        for mem, rel, rec in zip(mems, relevances, recencies):
             score = (
                 cfg.alpha * rel
                 + cfg.beta * mem.importance
                 + cfg.gamma * rec
-                - cfg.lam * redundancy
             )
             scored.append((mem, score, rel, rec))
 
@@ -165,16 +159,59 @@ class ContextBuilder:
         scored: list[tuple[MemoryObject, float, float, float]],
         token_budget: int,
     ) -> list[tuple[MemoryObject, float, float, float]]:
-        """Greedy selection: add memories in score order until budget is exhausted."""
-        selected = []
-        used_tokens = 0
+        """
+        Greedy MMR selection under token budget.
 
-        for mem, score, rel, rec in scored:
-            tokens = _count_tokens(mem.fact)
-            if used_tokens + tokens > token_budget:
-                continue
-            selected.append((mem, score, rel, rec))
-            used_tokens += tokens
+        At each step picks the candidate that maximizes:
+            mmr_score = base_score - λ · max_cosine_sim_to_already_selected
+
+        This correctly penalizes redundancy with respect to the *selected* set,
+        not all other candidates — the standard Maximal Marginal Relevance algorithm
+        (Carbonell & Goldstein 1998).
+        """
+        cfg = self.config
+        selected: list[tuple[MemoryObject, float, float, float]] = []
+        selected_embeddings: list[np.ndarray] = []
+        used_tokens = 0
+        remaining = list(scored)
+
+        while remaining:
+            best_idx = -1
+            best_mmr = -float("inf")
+
+            for i, (mem, base_score, rel, rec) in enumerate(remaining):
+                tokens = _count_tokens(mem.fact)
+                if used_tokens + tokens > token_budget:
+                    continue
+
+                if selected_embeddings and mem.embedding:
+                    emb = np.array(mem.embedding)
+                    norm = np.linalg.norm(emb)
+                    if norm > 1e-9:
+                        sims = [
+                            float(np.dot(emb, s_emb) / (norm * np.linalg.norm(s_emb)))
+                            for s_emb in selected_embeddings
+                            if np.linalg.norm(s_emb) > 1e-9
+                        ]
+                        max_sim = max(sims) if sims else 0.0
+                    else:
+                        max_sim = 0.0
+                else:
+                    max_sim = 0.0
+
+                mmr_score = base_score - cfg.lam * max_sim
+                if mmr_score > best_mmr:
+                    best_mmr = mmr_score
+                    best_idx = i
+
+            if best_idx == -1:
+                break  # nothing fits in remaining budget
+
+            mem, base_score, rel, rec = remaining.pop(best_idx)
+            selected.append((mem, base_score, rel, rec))
+            used_tokens += _count_tokens(mem.fact)
+            emb = np.array(mem.embedding) if mem.embedding else np.zeros(384)
+            selected_embeddings.append(emb)
 
         return selected
 
@@ -194,12 +231,12 @@ class ContextBuilder:
 
 
 # ──────────────────────────────────────────────
-# Token counting (approximate)
+# Token counting
 # ──────────────────────────────────────────────
 
 def _count_tokens(text: str) -> int:
-    """Approximate token count: ~4 chars per token."""
-    return max(1, len(text) // 4)
+    """Accurate token count using tiktoken cl100k_base (gpt-4o / gpt-4o-mini)."""
+    return max(1, len(_TOKENIZER.encode(text)))
 
 
 # ──────────────────────────────────────────────
@@ -229,31 +266,3 @@ def _compute_recencies(timestamps: list[str]) -> list[float]:
     return [1.0 - (t / max_age) for t in times]
 
 
-# ──────────────────────────────────────────────
-# Redundancy penalty
-# ──────────────────────────────────────────────
-
-def _max_pairwise_similarity(
-    idx: int, embeddings: list[np.ndarray]
-) -> float:
-    """
-    Compute max cosine similarity between memory[idx] and all others.
-    Used as a redundancy penalty.
-    """
-    if len(embeddings) <= 1:
-        return 0.0
-    emb = embeddings[idx]
-    norm = np.linalg.norm(emb)
-    if norm < 1e-9:
-        return 0.0
-
-    others = [embeddings[j] for j in range(len(embeddings)) if j != idx]
-    sims = []
-    for other in others:
-        other_norm = np.linalg.norm(other)
-        if other_norm < 1e-9:
-            continue
-        sim = float(np.dot(emb, other) / (norm * other_norm))
-        sims.append(sim)
-
-    return max(sims) if sims else 0.0

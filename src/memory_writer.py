@@ -111,13 +111,16 @@ class MemoryWriter:
         turns = conversation.turns
 
         windows = self._make_windows(turns)
+        n_windows = len(windows)
 
-        for window_turns in windows:
-            raw_facts = self._extract_facts(window_turns, verbose=verbose)
+        for i, window_turns in enumerate(windows):
+            if verbose:
+                print(f"\r  window {i+1}/{n_windows} ...", end="", flush=True)
+            raw_facts = self._extract_facts(window_turns, verbose=False)
             if not raw_facts:
                 continue
 
-            scored = self._score_importance(raw_facts, verbose=verbose)
+            scored = self._score_importance(raw_facts, verbose=False)
             turn_ids = [t.turn_id for t in window_turns]
 
             for fact_data, score_data in zip(raw_facts, scored):
@@ -132,6 +135,9 @@ class MemoryWriter:
                     session_id=conversation.session_id,
                 )
                 all_memories.append(mem)
+
+        if verbose:
+            print()  # newline after progress line
 
         # Embed all memories
         self._embed_memories(all_memories)

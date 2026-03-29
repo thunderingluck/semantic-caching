@@ -24,7 +24,7 @@ from openai import OpenAI
 
 from ingestor import Conversation, QAPair
 from memory_store import MemoryStore
-from context_builder import ContextBuilder
+from context_builder import ContextBuilder, _count_tokens
 from memory_writer import MemoryObject
 
 
@@ -47,6 +47,7 @@ class QAResult:
     memory_recall: Optional[float] = None
     retrieval_precision: Optional[float] = None
     reward: Optional[float] = None
+    retrieved_memory_ids: list = field(default_factory=list)
 
 
 @dataclass
@@ -268,7 +269,7 @@ class Evaluator:
 
                 em = exact_match(predicted, qa.answer)
                 f1 = token_f1(predicted, qa.answer)
-                ctx_tokens = len(context) // 4
+                ctx_tokens = _count_tokens(context)
 
                 mem_recall = compute_memory_recall(qa.evidence_turn_ids, session_memories)
                 ret_prec = compute_retrieval_precision(qa.evidence_turn_ids, retrieved_mems)
@@ -286,6 +287,7 @@ class Evaluator:
                     method="semantic_cache",
                     memory_recall=mem_recall,
                     retrieval_precision=ret_prec,
+                    retrieved_memory_ids=[m.id for m in retrieved_mems],
                 )
                 result.reward = compute_reward(
                     result, qa.evidence_turn_ids, retrieved_mems, session_memories
@@ -319,7 +321,7 @@ class Evaluator:
 
                 em = exact_match(predicted, qa.answer)
                 f1 = token_f1(predicted, qa.answer)
-                ctx_tokens = len(context) // 4
+                ctx_tokens = _count_tokens(context)
 
                 result = QAResult(
                     question_id=qa.question_id,
@@ -391,3 +393,74 @@ class Evaluator:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         print(f"Saved {len(results)} results to {path}")
+
+
+# ──────────────────────────────────────────────
+# RLVR importance learning
+# ──────────────────────────────────────────────
+
+class ImportanceLearner:
+    """
+    Applies RLVR reward signals retrospectively to memory importance scores.
+
+    After QA evaluation, memories that enabled correct answers gain importance;
+    memories that were retrieved but didn't help lose importance. This closes
+    the policy learning loop: the importance scores used by ContextBuilder are
+    updated based on observed downstream utility rather than remaining static
+    LLM-prompt estimates.
+
+    Reward mapping:
+      +1.0  correct answer AND evidence retrieved  → importance += lr
+      -0.5  incorrect AND memory existed but missed → importance -= lr * penalty
+      -1.0  incorrect AND memory not in store        → no update (nothing to adjust)
+       0.0  otherwise                               → no update
+
+    Args:
+        store:   MemoryStore whose importance scores will be updated
+        lr:      learning rate for positive updates
+        penalty: fraction of lr applied as negative update
+    """
+
+    def __init__(self, store: MemoryStore, lr: float = 0.05, penalty: float = 0.5):
+        self.store = store
+        self.lr = lr
+        self.penalty = penalty
+
+    def apply(self, results: list[QAResult]) -> dict[str, float]:
+        """
+        Update importance scores from a batch of QA results.
+
+        Returns a dict mapping memory_id → net delta applied (for inspection).
+        """
+        deltas: dict[str, float] = {}
+
+        for result in results:
+            if not result.retrieved_memory_ids or result.reward is None:
+                continue
+            if result.reward == 1.0:
+                delta = self.lr
+            elif result.reward == -0.5:
+                delta = -self.lr * self.penalty
+            else:
+                continue
+
+            for mem_id in result.retrieved_memory_ids:
+                self.store.update_importance(mem_id, delta)
+                deltas[mem_id] = deltas.get(mem_id, 0.0) + delta
+
+        return deltas
+
+    def summarize_updates(self, deltas: dict[str, float]) -> None:
+        """Print a summary of importance updates applied."""
+        if not deltas:
+            print("[ImportanceLearner] No updates applied.")
+            return
+        positive = sum(1 for d in deltas.values() if d > 0)
+        negative = sum(1 for d in deltas.values() if d < 0)
+        print(
+            f"[ImportanceLearner] Updated {len(deltas)} memories: "
+            f"{positive} boosted, {negative} penalized"
+        )
+        print(f"  Mean delta : {sum(deltas.values()) / len(deltas):.4f}")
+        print(f"  Max boost  : {max(deltas.values()):.4f}")
+        print(f"  Max penalty: {min(deltas.values()):.4f}")
