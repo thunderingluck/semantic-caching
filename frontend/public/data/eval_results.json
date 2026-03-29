@@ -1,0 +1,26 @@
+{
+  "semantic_cache": {
+    "exact_match_rate": 0.0,
+    "avg_f1": 0.04621553884711779,
+    "avg_tokens": 681.005,
+    "n": 20
+  },
+  "full_history": {
+    "exact_match_rate": 0.0,
+    "avg_f1": 0.03772233217611369,
+    "avg_tokens": 3794.6999999999985,
+    "n": 20
+  },
+  "rolling_summary": {
+    "exact_match_rate": 0.0,
+    "avg_f1": 0.0034482758620689655,
+    "avg_tokens": 365.3000000000001,
+    "n": 20
+  },
+  "naive_rag": {
+    "exact_match_rate": 0.0,
+    "avg_f1": 0.05787940439333629,
+    "avg_tokens": 319.15,
+    "n": 20
+  }
+}
